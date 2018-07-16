@@ -1,0 +1,136 @@
+#!/bin/sh
+# $FreeBSD: head/www/nginx/files/nginx.in 340872 2014-01-24 00:14:07Z mat $
+
+# PROVIDE: nginx
+# REQUIRE: LOGIN cleanvar
+# KEYWORD: shutdown
+
+#
+# Add the following lines to /etc/rc.conf to enable nginx:
+# nginx_enable (bool):		Set to "NO" by default.
+#				Set it to "YES" to enable nginx
+# nginx_profiles (str):		Set to "" by default.
+#				Define your profiles here.
+# nginx_pid_prefix (str):	Set to "" by default.
+#				When using profiles manually assign value to "nginx_"
+#				for prevent collision with other PIDs names.
+# nginxlimits_enable (bool):	Set to "NO" by default.
+#				Set it to yes to run `limits $limits_args`
+#				just before nginx starts.
+# nginx_flags (str):		Set to "" by default.
+#				Extra flags passed to start command.
+# nginxlimits_args (str):	Default to "-e -U www"
+#				Arguments of pre-start limits run.
+
+. /etc/rc.subr
+
+name="openresty"
+rcvar=openresty_enable
+
+start_precmd="openresty_precmd"
+restart_precmd="openresty_checkconfig"
+reload_precmd="openresty_checkconfig"
+configtest_cmd="openresty_checkconfig"
+gracefulstop_cmd="openresty_gracefulstop"
+upgrade_precmd="openresty_checkconfig"
+upgrade_cmd="openresty_upgrade"
+command="/usr/local/sbin/openresty"
+_pidprefix="/var/run"
+pidfile="${_pidprefix}/${name}.pid"
+_tmpprefix="/var/tmp/nginx"
+required_files=/usr/local/etc/openresty/openresty.conf
+extra_commands="reload configtest upgrade gracefulstop"
+
+[ -z "$openresty_enable" ]		&& openresty_enable="NO"
+[ -z "$openrestylimits_enable" ]	&& openrestylimits_enable="NO"
+[ -z "$openrestylimits_args" ]	&& openrestylimits_args="-e -U www"
+
+load_rc_config $name
+
+if [ -n "$2" ]; then
+	profile="$2"
+	if [ "x${openresty_profiles}" != "x" ]; then
+		pidfile="${_pidprefix}/${openresty_pid_prefix}${profile}.pid"
+		eval openresty_configfile="\${openresty_${profile}_configfile:-}"
+		if [ "x${openresty_configfile}" = "x" ]; then
+			echo "You must define a configuration file (openresty_${profile}_configfile)"
+			exit 1
+		fi
+		required_files="${openresty_configfile}"
+		eval openresty_enable="\${openresty_${profile}_enable:-${openresty_enable}}"
+		eval openresty_flags="\${openresty_${profile}_flags:-${openresty_flags}}"
+		eval openrestylimits_enable="\${openrestylimits_${profile}_enable:-${openrestylimits_enable}}"
+		eval openrestylimits_args="\${openrestylimits_${profile}_args:-${openrestylimits_args}}"
+		openresty_flags="-c ${openresty_configfile} -g \"pid ${pidfile};\" ${openresty_flags}"
+	else
+		echo "$0: extra argument ignored"
+	fi
+else
+	if [ "x${openresty_profiles}" != "x" -a "x$1" != "x" ]; then
+		for profile in ${openresty_profiles}; do
+			echo "===> openresty profile: ${profile}"
+			/usr/local/etc/rc.d/openresty $1 ${profile}
+			retcode="$?"
+			if [ "0${retcode}" -ne 0 ]; then
+				failed="${profile} (${retcode}) ${failed:-}"
+			else
+				success="${profile} ${success:-}"
+			fi
+		done
+		exit 0
+	fi
+fi
+
+# tmpfs(5)
+openresty_checktmpdir()
+{
+	if [ ! -d ${_tmpprefix} ] ; then
+		install -d -o www -g www -m 755 ${_tmpprefix}
+	fi
+}
+
+openresty_checkconfig()
+{
+	openresty_checktmpdir
+
+	echo "Performing sanity check on nginx configuration:"
+	eval ${command} ${nginx_flags} -t
+}
+
+openresty_gracefulstop()
+{
+	echo "Performing a graceful stop:"
+	sig_stop="QUIT"
+	run_rc_command ${rc_prefix}stop $rc_extra_args || return 1
+}
+
+openresty_upgrade()
+{
+	echo "Upgrading nginx binary:"
+
+	reload_precmd=""
+	sig_reload="USR2"
+	run_rc_command ${rc_prefix}reload $rc_extra_args || return 1
+
+	sleep 1
+
+	echo "Stopping old binary:"
+
+	sig_reload="QUIT"
+	pidfile="$pidfile.oldbin"
+	run_rc_command ${rc_prefix}reload $rc_extra_args || return 1
+}
+
+openresty_precmd() 
+{
+	openresty_checkconfig
+
+	if checkyesno openrestylimits_enable
+	then
+		eval `/usr/bin/limits ${openrestylimits_args}` 2>/dev/null
+	else
+		return 0
+	fi
+}
+
+run_rc_command "$1"
